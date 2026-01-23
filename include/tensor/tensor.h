@@ -1,9 +1,9 @@
 #pragma once
 #include <iostream>
 #include "debug.h"
-#include "simd_utils.h"
+#include "simd/simd_utils.h"
 #include <stdio.h>
-#include "network_parameters.h"
+#include "network/network_parameters.h"
 #include <array>
 #include <stdlib.h>
 #include <vector>
@@ -22,6 +22,35 @@ class Tensor;
 
 template<std::size_t ...Dimensions>
 void print(const Tensor<Dimensions...>& tensor, float numDecimals = 2.f);
+
+
+template <std::size_t... Dims>
+Tensor<Dims...> zeros();
+
+template <std::size_t... Dims>
+Tensor<Dims...> ones();
+
+template <std::size_t... Dims>
+Tensor<Dims...> normal(float mean, float std);
+
+
+template <std::size_t numInput, std::size_t numOutput>
+Tensor<numInput, numOutput> glorot_normal();
+
+template <std::size_t numInput, std::size_t numOutput>
+Tensor<numInput, numOutput> glorot_uniform();
+
+template <std::size_t numInput, std::size_t numOutput>
+Tensor<numInput, numOutput> he_normal();
+
+template <std::size_t numInput, std::size_t numOutput>
+Tensor<numInput, numOutput> he_uniform();
+
+template <std::size_t numInput, std::size_t numOutput>
+Tensor<numInput, numOutput> lecun_normal();
+
+template <std::size_t numInput, std::size_t numOutput>
+Tensor<numInput, numOutput> lecun_uniform();
 
 
 template <std::size_t... Dimensions>
@@ -120,7 +149,6 @@ public:
     // Often used with SELU or sigmoid activation function
     template <std::size_t numInput, std::size_t numOutput>
     friend  Tensor<numInput, numOutput> lecun_uniform();
-
 
     // Destructor
     ~Tensor();
@@ -460,7 +488,4 @@ private:
                                               (_size >= 4 * PACKAGE_LENGTH) ? 4 : 1;
 };
 
-#include "Tensor.cpp"
-#include "network_utils.cpp"
-#include "kernel_utils.cpp"
-#include "simd_utils.cpp"
+#include "tensor.tpp"

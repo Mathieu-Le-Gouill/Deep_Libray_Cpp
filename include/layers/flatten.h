@@ -1,5 +1,5 @@
 #pragma once
-#include "Layer.h"
+#include "layer.h"
 
 template <::std::size_t... inputDims>
 class Flatten : public Layer< Flatten<inputDims...>, Tensor<inputDims...>, Tensor<(1 * ... * inputDims)>>

@@ -84,7 +84,7 @@ inline PACKAGE_FLOAT exp_ps(PACKAGE_FLOAT x) {
         COPY_MM_TO_XMM(mm0, mm1, pow2n);
         _mm_empty();
     #else
-        emm0 = _CVT_EPI32_PS(fx);
+        emm0 = _CVT_PS_EPI32(fx);
         emm0 = _ADD_EPI32(emm0, _pi32_0x7f);
         emm0 = _SLLI_EPI32(emm0, 23);
         pow2n = _CASTSI_PS(emm0);
@@ -130,7 +130,7 @@ inline PACKAGE_FLOAT log_ps(PACKAGE_FLOAT x) {
         emm0 = _SRLI_EPI32(_CASTPS_SI(x), 23);
     #endif
     /* keep only the fractional part */
-    x = _AND(x, _ps_inv_mant_mask);
+    x = _AND(x, _CASTSI_PS(_ps_inv_mant_mask));
     x = _OR_PS(x, _ps_0p5);
 
  #ifndef USE_SSE2
@@ -203,37 +203,35 @@ inline PACKAGE_FLOAT log_ps(PACKAGE_FLOAT x) {
 #ifdef __AVX512F__
 
 // Unified function to generate random values
-template <typename Generator,typename Distribution>
-inline PACKAGE_TYPE _RAND(Generator& generator, Distribution& distribution) 
-{
-	return _SET(distribution(generator), distribution(generator), distribution(generator), distribution(generator),
-                distribution(generator), distribution(generator), distribution(generator), distribution(generator),
-                distribution(generator), distribution(generator), distribution(generator), distribution(generator),
-                distribution(generator), distribution(generator), distribution(generator), distribution(generator));
+template <typename Generator, typename Distribution>
+inline __m512 _RAND(Generator& g, Distribution& d) {
+    float vals[16];
+    for(int i=0; i<16; ++i) vals[i] = d(g);
+    return _mm512_loadu_ps(vals);
 }
+
 
 // Compute the sum of a vector of 16 floats
 // Ref : https://stackoverflow.com/a/26905830
 inline float _HSUM(__m512 a) {
-    __m256 low  = _mm512_castps512_ps256(zmm);
-	__m256 high = _mm256_castpd_ps(_mm512_extractf64x4_pd(_mm512_castps_pd(zmm),1));
+    __m256 low  = _mm512_castps512_ps256(a);
+    __m256 high = _mm512_extractf32x8_ps(a, 1);
+    __m256 sum256 = _mm256_add_ps(low, high);
 
-	__m256 lh = _mm256_add_ps(low,high);
+    __m128 t1 = _mm256_hadd_ps(sum256, sum256);
+    __m128 t2 = _mm256_hadd_ps(t1, t1);
+    __m128 t3 = _mm256_extractf128_ps(t2, 1);
+    __m128 t4 = _mm_add_ss(_mm256_castps256_ps128(t2), t3);
 
-	__m256 t1 = _mm256_hadd_ps(lh,lh);
-    __m256 t2 = _mm256_hadd_ps(t1,t1);
-    __m128 t3 = _mm256_extractf128_ps(t2,1);
-    __m128 t4 = _mm_add_ss(_mm256_castps256_ps128(t2),t3);
-
-	return _mm_cvtss_f32(t4); 
+    return _mm_cvtss_f32(t4);
 }
 
 // Get the max value of a vector of 16 floats
 inline float _HMAX(__m512 a) {
-    __m256 low  = _mm512_castps512_ps256(zmm);
-	__m256 high = _mm256_castpd_ps(_mm512_extractf64x4_pd(_mm512_castps_pd(zmm),1));
+    __m256 low  = _mm512_castps512_ps256(a);
+	__m256 high = _mm512_extractf32x8_ps(a, 1);
     
-    __m256 max256 = _mm256_max_ps(lower, upper);
+    __m256 max256 = _mm256_max_ps(low, high);
     
     __m256 perm0 = _mm256_permute_ps(max256, 0b01001110);
     __m256 max1 = _mm256_max_ps(max256, perm0);
@@ -470,23 +468,27 @@ inline void _TRANSPOSE(__m128 (&rows)[4])
 template<uint16_t offset>
 inline PACKAGE_INT remainderMaskSI()
 {
-    if (offset == 0) {
-        return _mm256_setzero_si256();
-    }
-
     // Make a mask of 8 bytes
-    // No need to clip for missingLanes <= 8 because the shift is already good, results in zero
-    uint64_t mask = ~(uint64_t) 0;
+    uint64_t mask = ~(uint64_t)0;
     mask >>= (PACKAGE_LENGTH - offset) * 8;
-    // Sign extend these bytes into int32 lanes in AVX vector
-    __m128 tmp = _mm_cvtsi64_si128((int64_t)mask);
+
+    // Convert to 128-bit vector
+    __m128i tmp = _mm_cvtsi64_si128((int64_t)mask);
 
     #if defined(__AVX512F__) || defined(__AVX__)
-        return _CVT_EPI8_EPI32(tmp);
+        return _CVT_EPI8_EPI32(tmp); // expand to 32-bit lanes
     #else
-        return tmp;
+        return tmp; // fallback
     #endif
 }
+
+// Specialization: offset = 0
+template<>
+inline PACKAGE_INT remainderMaskSI<0>()
+{
+    return _mm256_setzero_si256(); // no lanes active
+}
+
 
 #else
     #ifdef __AVX512F__

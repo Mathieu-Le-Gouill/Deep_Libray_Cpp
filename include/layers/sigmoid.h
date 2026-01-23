@@ -1,5 +1,5 @@
 #pragma once
-#include "Layer.h"
+#include "layer.h"
 
 template <::std::size_t... inputDims>
 class Sigmoid : public Layer< Sigmoid<inputDims...>, Tensor<inputDims...>, Tensor<inputDims...>>

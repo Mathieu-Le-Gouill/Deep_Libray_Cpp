@@ -1,6 +1,6 @@
 #pragma once
-#include "Layer.h"
-#include "../network_parameters.h"
+#include "layer.h"
+#include "network/network_parameters.h"
 
 template <::std::size_t... inputDims>
 class Norm : public Layer< Norm<inputDims...>, Tensor<inputDims..., minibatchSize>, Tensor<inputDims..., minibatchSize>>

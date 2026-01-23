@@ -1,7 +1,7 @@
 #include <iostream>
 #include <chrono>
-#include "Pipeline.h"
-#include "MNIST_Loader.h"
+#include "pipeline/pipeline.h"
+#include "loader/mnist_loader.h"
 
 #define PERF_NET 0
 #define TEST_NET 1
@@ -12,8 +12,8 @@ using namespace ::std::chrono;
 
 int main()
 {  
-    auto inputs = Load_MNIST_File("train-images.idx3-ubyte", nbTrainImages);
-    auto targets = GetTargetValues("train-labels.idx1-ubyte", nbTrainImages);
+    auto inputs = Load_MNIST_File("../data/train-images.idx3-ubyte", nbTrainImages);
+    auto targets = GetTargetValues("../data/train-labels.idx1-ubyte", nbTrainImages);
 
     Pipeline< Flatten<inputWidth, inputHeight>,
         Dense<inputSize, 32, LeCun_Normal>,
@@ -74,8 +74,8 @@ int main()
     #if TEST_NET
         cout << "\nTESTING..." << endl;
 
-        inputs = Load_MNIST_File("t10k-images.idx3-ubyte", nbTestImages);
-        targets = GetTargetValues("t10k-labels.idx1-ubyte", nbTestImages);
+        inputs = Load_MNIST_File("../data/t10k-images.idx3-ubyte", nbTestImages);
+        targets = GetTargetValues("../data/t10k-labels.idx1-ubyte", nbTestImages);
 
         cumulativeAccuracy = cumulativeLoss = 0.f;
 

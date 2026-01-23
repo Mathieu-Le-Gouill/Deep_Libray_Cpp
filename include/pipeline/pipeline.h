@@ -1,12 +1,12 @@
 #pragma once
-#include "Layers/Layer.h"
-#include "Layers/Conv.h"
-#include "Layers/ReLu.h"
-#include "Layers/Dense.h"
-#include "Layers/Flatten.h"
-#include "Layers/Norm.h"
-#include "Layers/Sigmoid.h"
-#include "Layers/Softmax.h"
+#include "layers/layer.h"
+#include "layers/conv.h"
+#include "layers/relu.h"
+#include "layers/dense.h"
+#include "layers/flatten.h"
+#include "layers/norm.h"
+#include "layers/sigmoid.h"
+#include "layers/softmax.h"
 
 #include <utility>
 #include <tuple>

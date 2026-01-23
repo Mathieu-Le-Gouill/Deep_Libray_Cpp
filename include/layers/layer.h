@@ -1,6 +1,6 @@
 #pragma once
-#include "../Tensor.h"
-#include "../network_parameters.h"
+#include "tensor/tensor.h"
+#include "network/network_parameters.h"
 
 template <typename child, typename input, typename output>
 class Layer

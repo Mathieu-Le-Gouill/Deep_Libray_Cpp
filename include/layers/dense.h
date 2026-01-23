@@ -1,5 +1,5 @@
 #pragma once
-#include "Layer.h"
+#include "layer.h"
 
 template <::std::size_t num_input_neurons,
           ::std::size_t num_output_neurons,

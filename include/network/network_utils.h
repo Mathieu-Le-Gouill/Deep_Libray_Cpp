@@ -1,4 +1,7 @@
-#include "Tensor.h"
+#include "tensor/tensor.h"
+#include <cmath>
+#include <random>
+#include <cstring> 
 
 #ifndef _CMP_GT_OQ
     #define _CMP_GT_OQ 30

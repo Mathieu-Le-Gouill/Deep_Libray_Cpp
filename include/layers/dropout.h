@@ -1,5 +1,5 @@
 #pragma once
-#include "Layer.h"
+#include "layer.h"
 
 template <::size_t... inputDims>
 class Dropout : public Layer< Tensor<inputDims..., minibatchSize>, Tensor<inputDims..., minibatchSize>>

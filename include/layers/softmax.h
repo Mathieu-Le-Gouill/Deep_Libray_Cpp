@@ -1,5 +1,5 @@
 #pragma once
-#include "Layer.h"
+#include "layer.h"
 
 template <::std::size_t... inputDims>
 class Softmax : public Layer< Softmax<inputDims...>, Tensor<inputDims..., minibatchSize>, Tensor<inputDims..., minibatchSize>>

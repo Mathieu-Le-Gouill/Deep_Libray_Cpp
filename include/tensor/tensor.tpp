@@ -1,11 +1,15 @@
-#include "Tensor.h"
+#include "tensor.h"
 #include "debug.h"
+#include "network/network_utils.h"
+#include "tensor/kernel_utils.h"
+#include "simd/simd_utils.h"
+
 #include <cstring>
 #include <cfloat>
 #include <optional>
 #include <sstream>
 #include <iomanip>
-#include "compiler_optimizations.h"
+#include "compiler/compiler_optimizations.h"
 #include <random>
 #include <chrono>
 

@@ -1,3 +1,4 @@
+#pragma once
 #include <xmmintrin.h>
 #include <emmintrin.h>
 #include <stdint.h>
@@ -356,3 +357,5 @@ PACKAGE_FLOAT blend_ps(PACKAGE_FLOAT a, PACKAGE_FLOAT b, const int imm8);
 PACKAGE_FLOAT load1_ps(const float* p);
 
 void maskstore_ps(float *a, PACKAGE_INT mask, PACKAGE_FLOAT b);
+
+#include "simd_utils.tpp"
