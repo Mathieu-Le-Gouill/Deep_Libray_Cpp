@@ -14,10 +14,8 @@
   So that each neurons in a given layer affect all the following layers neurons depending of the weights impact.
      
   <img src="https://miro.medium.com/max/791/0*hzIQ5Fs-g8iBpVWq.jpg" width="50%" height="50%">
-     
-  Here is the link of my source to get a better understanding of an artificial neural network : http://neuralnetworksanddeeplearning.com/chap1.html
 
-
+---
 
  ## How works a Neural Network ?
 
@@ -32,3 +30,9 @@
   <h3>The back propagation :</h3>
   <img src="https://www.guru99.com/images/1/030819_0937_BackPropaga1.png" width="50%" height="50%">
   It compute the loss of the last layer, then propagate it using weights and biases to get the gradient of each layers so that we can use it for the gradient descent latter on.
+
+---
+
+## References
+
+- [Neural Networks and Deep Learning](http://neuralnetworksanddeeplearning.com/chap1.html)
