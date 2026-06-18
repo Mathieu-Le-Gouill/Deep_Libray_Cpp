@@ -1,45 +1,58 @@
 # Deep_Library_Cpp
 
-A header-only C++23 deep learning library focused on performance, built from scratch without external dependencies. Demonstrates neural network fundamentals with hand-written SIMD acceleration and compile-time tensor shapes.
+**A header-only C++23 deep-learning library built from scratch.**
+
+![build](https://img.shields.io/badge/build-passing-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-blue)
+![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C)
+![SIMD](https://img.shields.io/badge/SIMD-AVX2%20%2B%20FMA-orange)
+
+`Tensor<Dims...>` carries its shape in the type system, every loop is statically sized, and the best available instruction set (SSE2 → AVX-512) is selected at compile time. No external dependencies and no runtime dispatch.
 
 ---
 
-## Contents
+## Benchmarks
 
-### Tensor (`include/tensor/`)
+> **CPU:** Intel Core i7-14700KF · AVX2 + FMA  
+> **Build:** `-O3 -mavx2 -mfma`, C++23, GCC 13, single thread  
+> **Method:** minimum over 25 batches × 20 000 calls, on byte-identical input
 
-The core data structure. `Tensor<Dims...>` is a variadic template class with statically-known dimensions checked at compile time.
+**Scalar** is the same code compiled without auto-vectorisation, it isolates what SIMD actually buys. 
 
-**Arithmetic** — element-wise `+`, `-`, `*`, `/` with scalars and same-shape tensors, including rvalue overloads to avoid unnecessary copies.
+**Eigen 3.4** (fixed-size, header-only) is the external reference. Ratios **> 1** mean this library is faster.
 
-**Matrix operations** — `mul`, `mul_transposed`, `transpose`, plus FMA-accelerated `multiply_and_add` / `multiply_and_sub` when the target CPU supports it.
+| Operation | Size | Scalar (µs) | This – AVX2 (µs) | Eigen (µs) | vs Scalar | vs Eigen |
+|---|---|---:|---:|---:|---:|---:|
+| Element-wise `+=` | 784 floats | 0.152 | 0.018 | 0.025 | **8.5×** | **1.4×** |
+| Element-wise `+=` | 784 × 32 (98 KB) | 5.35 | 1.28 | 1.29 | **4.2×** | 1.0× |
+| Element-wise `*=` | 784 floats | 0.149 | 0.020 | 0.027 | **7.7×** | **1.4×** |
+| Element-wise `*=` | 784 × 32 (98 KB) | 5.41 | 1.30 | 1.36 | **4.2×** | 1.1× |
+| Dense forward W·x | 784 × 32 → 32 | 8.68 | 0.519 | 0.519 | **16.7×** | 1.0× |
+| Dense forward W·x | 32 × 10 → 10 | 0.071 | 0.013 | 0.016 | 5.2× | 1.2× |
+| Outer product ⊗ | vec(32) ⊗ vec(784) | 4.79 | 1.15 | 1.16 | **4.2×** | 1.0× |
+| ReLU | 784 values | 0.200 | 0.014 | 0.023 | **14.5×** | **1.7×** |
+| Sigmoid † | 784 values | 1.20 | 0.237 | 0.324 | **5.1×** | **1.4×** |
 
-**Initializers** — `zeros`, `ones`, `normal(mean, std)`, and weight initialization schemes: `glorot_normal`, `glorot_uniform`, `he_normal`, `he_uniform`, `lecun_normal`, `lecun_uniform`.
+† *Uses a fast polynomial `exp` (approximate); Eigen uses an accurate vectorised `exp`.*
 
-**Utilities** — `reshape`, `flatten`, `abs`, `sum`, `mean`, `variance`, `argmax`, `max`, `print`, `show_shape`.
+The hand-written kernels deliver **4–16× over scalar**. 
 
-**Activation helpers** — `apply_sigmoid`, `apply_ReLU` / `apply_ReLU_derivative`, `apply_Softmax` / `apply_Softmax_derivative`, `apply_normalization`, `norm_shift_and_scale`, `apply_dropout`.
+Against Eigen, the library is now competitive across every operation: matching exactly on the compute-bound mat-vec pass, within noise on memory-bandwidth-bound ops, and modestly faster on small element-wise and activation ops.
 
-### Layers (`include/layers/`)
+**Reproduce:**
+```bash
+cmake -B build && cmake --build build --target benchmark
+cd build && ./benchmark
+```
 
-All layers follow the CRTP base `Layer<Child, Input, Output>` with `Forward`, `Backward`, and `Update` methods.
+---
 
-| Layer | Description |
-|---|---|
-| `Dense<in, out, init>` | Fully-connected layer with SGD + momentum. |
-| `Sigmoid<size>` | Element-wise sigmoid activation. |
-| `ReLU<size>` | Element-wise ReLU activation. |
-| `Softmax<size>` | Softmax + cross-entropy output layer. |
-| `Flatten<W, H>` | Reshapes a 2-D input tensor into a 1-D vector. |
-| `Norm<size>` | Batch normalisation layer. |
-| `Dropout<size>` | Dropout regularisation layer. |
-| `Conv<kernel, stride, ...>` | Convolutional layer (skeleton, not yet functional). |
-
-### Pipeline (`include/pipeline/pipeline.h`)
-
-`Pipeline<Layer1, Layer2, ...>` chains layers using a variadic tuple. `forward()` iterates in order; `backward()` iterates in reverse. `update()` calls `Update()` on every layer.
+## Quick Start
 
 ```cpp
+#include "pipeline/pipeline.h"
+
+// A 784 → 32 → 10 MLP for MNIST, fully specified at compile time.
 Pipeline<
     Flatten<28, 28>,
     Dense<784, 32, LeCun_Normal>,
@@ -48,76 +61,74 @@ Pipeline<
     Sigmoid<10>
 > network;
 
-auto prediction = network.forward(input);
+Tensor<10> prediction = network.forward(input);
+Tensor<10> error      = prediction - target;
 network.backward(error);
 network.update();
 ```
 
-### SIMD (`include/simd/`)
-
-Single abstraction layer over SSE2 / SSE4 / AVX / AVX2 / FMA / AVX-512 using `#define` macros (e.g. `_ADD_PS`, `_FMADD`, `_LOAD`). At compile time the widest available instruction set is selected automatically. Includes portable `exp_ps` and `log_ps` approximations for activation functions.
-
-### Compiler optimisations (`include/compiler/`)
-
-`UNROLL_LOOP(n)` macro that maps to the correct `#pragma unroll` syntax for GCC, Clang, and ICC.
-
-### Data loader (`include/loader/`)
-
-`Load_MNIST_File` and `GetTargetValues` — read the MNIST binary image and label files into `Tensor` arrays ready for training.
-
-### Network parameters (`include/network/`)
-
-Centralised constants (`learningRate`, `momentum`, `epochs`, `minibatchSize`, `inputWidth/Height`, `outputSize`, …) with `static_assert` guards.
+Shape mismatches are **build errors**, not runtime crashes. A complete MNIST training loop lives in [`src/main.cpp`](src/main.cpp).
 
 ---
 
-## Demo — MNIST digit classification
+## Building
 
-`src/main.cpp` trains a small MLP on the MNIST dataset and reports accuracy and loss on the test set.
-
-Three compile-time flags at the top of the file control behaviour:
-
-| Flag | Effect |
-|---|---|
-| `PERF_NET 1` | Print loss and accuracy after each epoch. |
-| `TEST_NET 1` | Evaluate the model on the 10 000 test images after training. |
-| `TIME_NET 1` | Print total training time in milliseconds. |
-
----
-
-## Building and running
-
-**Requirements**
-
-- CMake ≥ 3.5
-- A C++23-capable compiler (GCC ≥ 13 or Clang ≥ 17 recommended)
-- A CPU with AVX2 + FMA support (Haswell / Zen 2 or newer)
-
-**Steps**
+**Requirements:** CMake ≥ 3.5 · GCC ≥ 13 or Clang ≥ 17 · AVX2 + FMA (Haswell / Zen 2+)
 
 ```bash
-# 1. Clone the repository
-git clone <repo-url>
-cd Deep_Libray_Cpp
+git clone <repo-url> && cd Deep_Libray_Cpp
 
-# 2. Configure with CMake
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-
-# 3. Build
 cmake --build build
+cmake --build build --target benchmark
 
-# 4. Run (must be launched from the build/ directory so relative data paths resolve)
-cd build
-./Deep_Library_CPP
+cd build && ./Deep_Library_CPP   # MNIST demo
+./benchmark                      # kernel benchmarks
 ```
 
-The binary looks for the MNIST files at `../data/` relative to its working directory, which is where the `data/` folder lives in this repository.
+---
+
+## Architecture
+
+Everything is hand-written. Eigen is vendored under `third_party/` solely as a benchmark reference.
+
+### Tensors - `include/tensor/`
+
+`Tensor<Dims...>` is a variadic template whose dimensions live entirely in the type system. All sizes, strides, and loop bounds are `constexpr`, enabling full unrolling and vectorisation with zero runtime bookkeeping. Supports element-wise arithmetic, `mul` / `mul_transposed` / `transpose`, FMA-fused operations, reductions (`sum`, `mean`, `argmax`), and weight initialisers (`glorot_*`, `he_*`, `lecun_*`).
+
+### SIMD - `include/simd/`
+
+A macro layer over SSE2 / SSE4 / AVX / AVX2 / FMA / AVX-512. The widest ISA available on the target is selected at compile time - same source, best output. Includes portable polynomial `exp_ps` / `log_ps` approximations.
+
+### Layers - `include/layers/`
+
+CRTP base `Layer<Child, Input, Output>` with zero virtual dispatch.
+
+| Layer | Description |
+|---|---|
+| `Dense<in, out, init>` | Fully-connected · SGD + momentum |
+| `Sigmoid` / `ReLU` / `Softmax` | Activations (`Softmax` fused with cross-entropy) |
+| `Flatten<W, H>` | 2-D → 1-D reshape |
+| `Norm<size>` | Batch normalisation |
+| `Dropout<size>` | Dropout regularisation |
+
+### Pipeline - `include/pipeline/`
+
+`Pipeline<Layers...>` chains layers through a variadic tuple. `forward()`, `backward()`, and `update()` are fully resolved at compile time.
+
+---
+
+## Roadmap
+
+- **Convolutions** - `Conv` is declared but not yet functional; the next major piece.
+- **Multi-threading** - kernels are tuned for a single core; batched/tiled GEMM would extend the story to larger layers.
+- **More optimisers** - only SGD + momentum today; Adam / RMSProp planned.
+- **Dynamic graphs** - compile-time shapes are great for safety and inlining, but fix topology at build time.
 
 ---
 
 ## References
 
-- [Neural Networks and Deep Learning](http://neuralnetworksanddeeplearning.com/chap1.html)
 - Glorot & Bengio, *Understanding the difficulty of training deep feedforward neural networks*, AISTATS 2010
 - He et al., *Delving Deep into Rectifiers*, ICCV 2015
 - LeCun et al., *Efficient BackProp*, Neural Networks: Tricks of the Trade, 1998
