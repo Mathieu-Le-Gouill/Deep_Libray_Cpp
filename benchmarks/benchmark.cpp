@@ -1,7 +1,17 @@
 // benchmarks/benchmark.cpp
 //
-// Compares this library's AVX2-vectorized kernels against scalar baselines
-// on sizes matching the actual MNIST network:
+// Fair, like-for-like comparison of this library's AVX2 kernels against:
+//   1. a scalar baseline  (same -O3, auto-vectorisation disabled)  → "what SIMD buys"
+//   2. Eigen 3.4 fixed-size types                                   → an established,
+//      header-only, fully-inlined, compile-time-sized C++ library - the closest
+//      possible apples-to-apples reference (no runtime dispatch, no framework).
+//
+// All three implementations run in the same process, on the same hardware, through
+// the same harness (benchmarks/bench_common.h), on byte-identical input data that
+// is reset (untimed) before every measurement batch. Outputs are anchored with
+// optimisation barriers so no implementation can have its work eliminated.
+//
+// Sizes match the actual MNIST network:
 //   Flatten<28,28> → Dense<784,32> → Sigmoid → Dense<32,10> → Sigmoid
 //
 // Build:  cd build && cmake .. && make benchmark
@@ -9,34 +19,37 @@
 
 #include <iostream>
 #include <iomanip>
-#include <chrono>
 #include <string>
+#include <random>
+#include <cstring>
+#include <chrono>      // also pulled in transitively by network_utils.h
 #include <immintrin.h>
 #include <cmath>
 
+#define EIGEN_DONT_PARALLELIZE
+#include <Eigen/Dense>
+
 #include "tensor/tensor.h"
 #include "network/network_parameters.h"
+#include "bench_common.h"
 
 // ============================================================
-// Scalar baselines — auto-vectorisation explicitly disabled
+// Scalar baselines - auto-vectorisation explicitly disabled
 // ============================================================
 
 #pragma GCC push_options
 #pragma GCC optimize("O3,no-tree-vectorize")
 
-// In-place element-wise add: a[i] += b[i]
 __attribute__((noinline))
 static void naive_add_ip(float* __restrict__ a, const float* __restrict__ b, size_t n) {
     for (size_t i = 0; i < n; ++i) a[i] += b[i];
 }
 
-// In-place element-wise mul: a[i] *= b[i]
 __attribute__((noinline))
 static void naive_mul_ip(float* __restrict__ a, const float* __restrict__ b, size_t n) {
     for (size_t i = 0; i < n; ++i) a[i] *= b[i];
 }
 
-// Dense forward: W(rows×cols) · v(cols) → out(rows)
 __attribute__((noinline))
 static void naive_matvec(const float* __restrict__ W, const float* __restrict__ v,
                           float* __restrict__ out, size_t cols, size_t rows) {
@@ -48,7 +61,6 @@ static void naive_matvec(const float* __restrict__ W, const float* __restrict__ 
     }
 }
 
-// Outer product: a(m) ⊗ b(n) → out(m×n)
 __attribute__((noinline))
 static void naive_outer(const float* __restrict__ a, size_t m,
                          const float* __restrict__ b, size_t n,
@@ -59,62 +71,64 @@ static void naive_outer(const float* __restrict__ a, size_t m,
     }
 }
 
-// ReLU: out[i] = max(0, a[i])
 __attribute__((noinline))
 static void naive_relu(float* __restrict__ a, size_t n) {
     for (size_t i = 0; i < n; ++i) a[i] = a[i] > 0.f ? a[i] : 0.f;
 }
 
-// Sigmoid: a[i] = 1 / (1 + exp(-a[i]))
 __attribute__((noinline))
 static void naive_sigmoid(float* __restrict__ a, size_t n) {
-    for (size_t i = 0; i < n; ++i)
-        a[i] = 1.f / (1.f + expf(-a[i]));
+    for (size_t i = 0; i < n; ++i) a[i] = 1.f / (1.f + expf(-a[i]));
 }
 
 #pragma GCC pop_options
 
 // ============================================================
-// Timing: returns µs / call, averaged over `iters` iterations
+// Helpers
 // ============================================================
 
-template<typename F>
-double bench_us(F&& fn, int warmup = 200, int iters = 10000) {
-    for (int i = 0; i < warmup; ++i) fn();
-    auto t0 = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < iters; ++i) fn();
-    auto t1 = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration<double, std::micro>(t1 - t0).count() / iters;
+static std::mt19937 g_rng(20240618);
+
+static float* alloc(size_t n) {
+    return static_cast<float*>(_mm_malloc(n * sizeof(float), 32));
 }
-
-// ============================================================
-// Output helpers
-// ============================================================
+static float* alloc_const(size_t n, float v) {
+    float* p = alloc(n);
+    for (size_t i = 0; i < n; ++i) p[i] = v;
+    return p;
+}
+static float* alloc_normal(size_t n) {
+    float* p = alloc(n);
+    std::normal_distribution<float> d(0.f, 1.f);
+    for (size_t i = 0; i < n; ++i) p[i] = d(g_rng);
+    return p;
+}
 
 static void print_header() {
     std::cout << "\n"
-              << std::left  << std::setw(44) << "Operation"
-              << std::setw(26) << "Dimensions"
-              << std::right << std::setw(11) << "Naive"
-              << std::setw(13) << "SIMD (AVX2)"
-              << std::setw(9)  << "Speedup"
-              << "\n"
-              << std::string(103, '-') << "\n";
-}
-
-static void print_row(const char* op, const char* dims,
-                      double naive_us, double simd_us) {
-    std::cout << std::left  << std::setw(44) << op
-              << std::setw(26) << dims
+              << std::left  << std::setw(34) << "Operation"
+              << std::setw(24) << "Size"
               << std::right
-              << std::setw(9)  << std::fixed << std::setprecision(3) << naive_us  << " µs"
-              << std::setw(11) << std::fixed << std::setprecision(3) << simd_us   << " µs"
-              << std::setw(8)  << std::fixed << std::setprecision(2) << (naive_us / simd_us) << "x"
-              << "\n";
+              << std::setw(11) << "Scalar"
+              << std::setw(13) << "This (AVX2)"
+              << std::setw(11) << "Eigen"
+              << std::setw(13) << "vs scalar"
+              << std::setw(12) << "vs Eigen"
+              << "\n" << std::string(118, '-') << "\n";
 }
 
-static void print_note(const char* msg) {
-    std::cout << "  " << msg << "\n";
+// ratio "vs Eigen": >1 means this library is faster than Eigen.
+static void print_row(const char* op, const char* size,
+                      double scalar_us, double lib_us, double eigen_us) {
+    std::cout << std::left  << std::setw(34) << op
+              << std::setw(24) << size
+              << std::right << std::fixed
+              << std::setw(8)  << std::setprecision(3) << scalar_us << " us"
+              << std::setw(10) << std::setprecision(3) << lib_us    << " us"
+              << std::setw(8)  << std::setprecision(3) << eigen_us  << " us"
+              << std::setw(11) << std::setprecision(2) << (scalar_us / lib_us) << "x"
+              << std::setw(11) << std::setprecision(2) << (eigen_us  / lib_us) << "x"
+              << "\n";
 }
 
 // ============================================================
@@ -123,238 +137,232 @@ static void print_note(const char* msg) {
 
 int main()
 {
+    Eigen::setNbThreads(1);
+
     std::cout
         << "======================================================================\n"
-        << "  Deep Library C++ — SIMD Kernel Benchmark\n"
-        << "  CPU   : Intel Core i7-14700KF  (measured @ 5.5 GHz)\n"
-        << "  SIMD  : AVX2 + FMA  (8 × float32 per register, 2 FMAs/cycle)\n"
-        << "  Build : -O3 -mavx2 -mfma -msse4.1 -msse4.2  (C++23)\n"
-        << "  Naive : scalar loops, same -O3, auto-vectorisation disabled\n"
-        << "  Times : mean over 10 000 iterations (µs per call)\n"
+        << "  Deep Library C++ - Kernel Benchmark (fair, single-thread)\n"
+        << "  CPU    : Intel Core i7-14700KF  (5.5 GHz max)\n"
+        << "  SIMD   : AVX2 + FMA  (8 x float32/register)\n"
+        << "  Build  : -O3 -mavx2 -mfma  (C++23)\n"
+        << "  Scalar : same -O3, auto-vectorisation disabled (no-tree-vectorize)\n"
+        << "  Eigen  : " << EIGEN_WORLD_VERSION << "." << EIGEN_MAJOR_VERSION << "."
+                          << EIGEN_MINOR_VERSION << ", fixed-size, 1 thread\n"
+        << "  Method : min of " << bench_cfg::REPEATS << " batches x "
+                                 << bench_cfg::ITERS << " calls; identical data; barriers on every result\n"
         << "======================================================================\n";
 
-    // Helper: allocate 32-byte-aligned buffer and fill with constant
-    auto alloc_fill = [](size_t n, float val) -> float* {
-        float* p = (float*)_mm_malloc(n * sizeof(float), 32);
-        for (size_t i = 0; i < n; ++i) p[i] = val;
-        return p;
+    // ────────────────────────────────────────────────────────────────────────
+    // Section 1 - Element-wise, in-place (+=, *=). No allocation on any side.
+    // ────────────────────────────────────────────────────────────────────────
+    print_header();
+    std::cout << "  [Element-wise - in-place]\n";
+
+    auto bench_elementwise = [&](const char* op, const char* size, size_t N,
+                                 float a0, float b0, bool mul)
+    {
+        float* golden = alloc_const(N, a0);
+        float* b      = alloc_const(N, b0);
+
+        float* as = alloc(N);          // scalar operand
+        float* ae = alloc(N);          // eigen  operand
+
+        auto reset_buf = [&](float* dst){ std::memcpy(dst, golden, N * sizeof(float)); };
+
+        double scalar_us = bench_us([&]{ reset_buf(as); },
+            [&]{ if (mul) naive_mul_ip(as, b, N); else naive_add_ip(as, b, N);
+                 ClobberMemory(); });
+
+        Eigen::Map<Eigen::Array<float, Eigen::Dynamic, 1>, Eigen::Aligned32> emA(ae, (Eigen::Index)N);
+        Eigen::Map<const Eigen::Array<float, Eigen::Dynamic, 1>, Eigen::Aligned32> emB(b, (Eigen::Index)N);
+        double eigen_us = bench_us([&]{ reset_buf(ae); },
+            [&]{ if (mul) emA *= emB; else emA += emB; ClobberMemory(); });
+
+        _mm_free(golden); _mm_free(b); _mm_free(as); _mm_free(ae);
+        return std::pair{scalar_us, eigen_us};
     };
 
-    // ============================================================
-    // Section 1 – Element-wise operations  (in-place, no alloc)
-    // ============================================================
-    print_header();
-    std::cout << "  [Element-wise — in-place (operator +=, *=), no allocation overhead]\n\n";
-
-    // ---- 1a. elem add — 784 floats (one input vector) ----
+    // Library element-wise needs the compile-time-sized Tensor type, so each size
+    // is spelled out explicitly.
     {
         constexpr size_t N = 784;
-        float* a = alloc_fill(N, 0.5f);
-        float* b = alloc_fill(N, 0.01f);
-        Tensor<N> ta(a), tb(b);
-
-        double naive_t = bench_us([&]{ naive_add_ip(a, b, N); });
-        double simd_t  = bench_us([&]{ ta += tb; });
-        print_row("Element-wise add  (+=)", "784 floats", naive_t, simd_t);
-        _mm_free(a); _mm_free(b);
+        float* golden = alloc_const(N, 0.5f);
+        float* b      = alloc_const(N, 0.01f);
+        Tensor<N> ta(golden), tb(b);
+        double lib_us = bench_us([&]{ ta = Tensor<N>(golden); },
+            [&]{ ta += tb; ClobberMemory(); });
+        auto [s, e] = bench_elementwise("add (+=)", "784 floats", N, 0.5f, 0.01f, false);
+        print_row("Element-wise add (+=)", "784 floats", s, lib_us, e);
+        _mm_free(golden); _mm_free(b);
     }
-
-    // ---- 1b. elem add — 784×32 floats (weight matrix) ----
-    {
-        constexpr size_t N = 784 * 32; // 25 088 floats = 98 KB
-        float* a = alloc_fill(N, 0.5f);
-        float* b = alloc_fill(N, 0.01f);
-        Tensor<N> ta(a), tb(b);
-
-        double naive_t = bench_us([&]{ naive_add_ip(a, b, N); });
-        double simd_t  = bench_us([&]{ ta += tb; });
-        print_row("Element-wise add  (+=)", "784×32 floats (98 KB)", naive_t, simd_t);
-        _mm_free(a); _mm_free(b);
-    }
-
-    // ---- 1c. elem mul — 784 floats ----
-    {
-        constexpr size_t N = 784;
-        float* a = alloc_fill(N, 0.999f);
-        float* b = alloc_fill(N, 0.999f);
-        Tensor<N> ta(a), tb(b);
-
-        double naive_t = bench_us([&]{ naive_mul_ip(a, b, N); });
-        double simd_t  = bench_us([&]{ ta *= tb; });
-        print_row("Element-wise mul  (*=)", "784 floats", naive_t, simd_t);
-        _mm_free(a); _mm_free(b);
-    }
-
-    // ---- 1d. elem mul — 784×32 floats ----
     {
         constexpr size_t N = 784 * 32;
-        float* a = alloc_fill(N, 0.999f);
-        float* b = alloc_fill(N, 0.999f);
-        Tensor<N> ta(a), tb(b);
+        float* golden = alloc_const(N, 0.5f);
+        float* b      = alloc_const(N, 0.01f);
+        Tensor<N> ta(golden), tb(b);
+        double lib_us = bench_us([&]{ ta = Tensor<N>(golden); },
+            [&]{ ta += tb; ClobberMemory(); });
+        auto [s, e] = bench_elementwise("add", "784x32 (98 KB)", N, 0.5f, 0.01f, false);
+        print_row("Element-wise add (+=)", "784x32 (98 KB)", s, lib_us, e);
+        _mm_free(golden); _mm_free(b);
+    }
+    {
+        constexpr size_t N = 784;
+        float* golden = alloc_const(N, 0.999f);
+        float* b      = alloc_const(N, 0.999f);
+        Tensor<N> ta(golden), tb(b);
+        double lib_us = bench_us([&]{ ta = Tensor<N>(golden); },
+            [&]{ ta *= tb; ClobberMemory(); });
+        auto [s, e] = bench_elementwise("mul", "784 floats", N, 0.999f, 0.999f, true);
+        print_row("Element-wise mul (*=)", "784 floats", s, lib_us, e);
+        _mm_free(golden); _mm_free(b);
+    }
+    {
+        constexpr size_t N = 784 * 32;
+        float* golden = alloc_const(N, 0.999f);
+        float* b      = alloc_const(N, 0.999f);
+        Tensor<N> ta(golden), tb(b);
+        double lib_us = bench_us([&]{ ta = Tensor<N>(golden); },
+            [&]{ ta *= tb; ClobberMemory(); });
+        auto [s, e] = bench_elementwise("mul", "784x32 (98 KB)", N, 0.999f, 0.999f, true);
+        print_row("Element-wise mul (*=)", "784x32 (98 KB)", s, lib_us, e);
+        _mm_free(golden); _mm_free(b);
+    }
 
-        double naive_t = bench_us([&]{ naive_mul_ip(a, b, N); });
-        double simd_t  = bench_us([&]{ ta *= tb; });
-        print_row("Element-wise mul  (*=)", "784×32 floats (98 KB)", naive_t, simd_t);
+    // ────────────────────────────────────────────────────────────────────────
+    // Section 2 - Dense forward: W·x. Output allocated per call on BOTH sides
+    // (the library returns a fresh Tensor; Eigen mallocs/frees a matching buffer)
+    // so the comparison includes the same allocation cost.
+    // ────────────────────────────────────────────────────────────────────────
+    std::cout << "\n  [Dense forward - W (rows x cols) * v(cols), output allocated per call]\n";
+
+    auto bench_matvec = [&](const char* size, auto rows_c, auto cols_c)
+    {
+        constexpr size_t ROWS = rows_c;
+        constexpr size_t COLS = cols_c;
+        float* W = alloc_normal(ROWS * COLS);
+        float* v = alloc_normal(COLS);
+
+        float* outn = alloc(ROWS);
+        double scalar_us = bench_us([&]{
+            naive_matvec(W, v, outn, COLS, ROWS); DoNotOptimize(outn[0]); });
+        _mm_free(outn);
+
+        Tensor<COLS, ROWS> tW(W);
+        Tensor<COLS>       tv(v);
+        double lib_us = bench_us([&]{
+            auto r = mul_b_transposed_scalar(tW, tv);
+            float s = r(0); DoNotOptimize(s); });
+
+        using MatW = Eigen::Matrix<float, ROWS, COLS, Eigen::RowMajor>;
+        Eigen::Map<const MatW, Eigen::Aligned32> eW(W);
+        Eigen::Map<const Eigen::Matrix<float, COLS, 1>, Eigen::Aligned32> ev(v);
+        double eigen_us = bench_us([&]{
+            float* o = alloc(ROWS);
+            Eigen::Map<Eigen::Matrix<float, ROWS, 1>> eo(o);
+            eo.noalias() = eW * ev;
+            DoNotOptimize(o[0]);
+            _mm_free(o); });
+
+        _mm_free(W); _mm_free(v);
+        char buf[48]; std::snprintf(buf, sizeof(buf), "%s", size);
+        print_row("Dense forward (mat-vec)", buf, scalar_us, lib_us, eigen_us);
+    };
+    bench_matvec("784x32 -> 32",  std::integral_constant<size_t,32>{}, std::integral_constant<size_t,784>{});
+    bench_matvec("32x10 -> 10",   std::integral_constant<size_t,10>{}, std::integral_constant<size_t,32>{});
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Section 3 - Dense backward: outer product grad ⊗ input → ΔW.
+    // Output allocated per call on both sides (same as forward).
+    // ────────────────────────────────────────────────────────────────────────
+    std::cout << "\n  [Dense backward - vec(m) (x) vec(n) -> m x n, output allocated per call]\n";
+
+    auto bench_outer = [&](const char* size, auto m_c, auto n_c)
+    {
+        constexpr size_t M = m_c;
+        constexpr size_t N = n_c;
+        float* a = alloc_normal(M);
+        float* b = alloc_normal(N);
+
+        float* outn = alloc(M * N);
+        double scalar_us = bench_us([&]{
+            naive_outer(a, M, b, N, outn); DoNotOptimize(outn[0]); });
+        _mm_free(outn);
+
+        Tensor<M> ta(a);
+        Tensor<N> tb(b);
+        double lib_us = bench_us([&]{
+            auto r = mul_transposed_scalar(ta, tb);
+            float s = r(0); DoNotOptimize(s); });
+
+        Eigen::Map<const Eigen::Matrix<float, M, 1>, Eigen::Aligned32> ea(a);
+        Eigen::Map<const Eigen::Matrix<float, N, 1>, Eigen::Aligned32> eb(b);
+        double eigen_us = bench_us([&]{
+            float* o = alloc(M * N);
+            Eigen::Map<Eigen::Matrix<float, M, N, Eigen::RowMajor>> eo(o);
+            eo.noalias() = ea * eb.transpose();
+            DoNotOptimize(o[0]);
+            _mm_free(o); });
+
         _mm_free(a); _mm_free(b);
-    }
+        print_row("Dense backward (outer)", size, scalar_us, lib_us, eigen_us);
+    };
+    bench_outer("vec(32) (x) vec(784)", std::integral_constant<size_t,32>{}, std::integral_constant<size_t,784>{});
+    bench_outer("vec(10) (x) vec(32)",  std::integral_constant<size_t,10>{}, std::integral_constant<size_t,32>{});
 
-    // ============================================================
-    // Section 2 – Dense Forward  (mul_b_transposed_scalar)
-    // Each call allocates the small output tensor internally.
-    // ============================================================
-    std::cout << "\n  [Dense Forward — W·x → out; includes small output alloc]\n\n";
+    // ────────────────────────────────────────────────────────────────────────
+    // Section 4 - Activations, in-place. Identical mixed-sign random input.
+    // ────────────────────────────────────────────────────────────────────────
+    std::cout << "\n  [Activations - in-place, mixed-sign random input]\n";
 
-    // ---- 2a. 784 → 32  (first layer) ----
+    auto bench_relu = [&](const char* size, auto n_c)
     {
-        constexpr size_t COLS = 784, ROWS = 32;
-        constexpr size_t FLOPS = COLS * ROWS * 2; // 50 176
+        constexpr size_t N = n_c;
+        float* golden = alloc_normal(N);
+        float* as = alloc(N);
+        float* ae = alloc(N);
+        auto cpy = [&](float* d){ std::memcpy(d, golden, N * sizeof(float)); };
 
-        float* W     = alloc_fill(ROWS * COLS, 0.1f);
-        float* v     = alloc_fill(COLS, 0.5f);
-        float* out_n = alloc_fill(ROWS, 0.f);
+        double scalar_us = bench_us([&]{ cpy(as); },
+            [&]{ naive_relu(as, N); ClobberMemory(); });
 
-        Tensor<COLS, ROWS> tW(W);
-        Tensor<COLS>       tv(v);
+        Tensor<N> ta(golden);
+        double lib_us = bench_us([&]{ ta = Tensor<N>(golden); },
+            [&]{ ta.apply_ReLU(); ClobberMemory(); });
 
-        double naive_t = bench_us([&]{
-            naive_matvec(W, v, out_n, COLS, ROWS);
-            volatile float s = out_n[0]; (void)s;
-        });
-        double simd_t = bench_us([&]{
-            auto r = mul_b_transposed_scalar(tW, tv);
-            volatile float s = r(0); (void)s;
-        });
+        Eigen::Map<Eigen::Array<float, N, 1>, Eigen::Aligned32> em(ae);
+        double eigen_us = bench_us([&]{ cpy(ae); },
+            [&]{ em = em.max(0.f); ClobberMemory(); });
 
-        char dims[64]; snprintf(dims, sizeof(dims), "784×32 · v(784)  [%zu FLOPs]", FLOPS);
-        print_row("Dense Forward  (mat-vec)", dims, naive_t, simd_t);
-        _mm_free(W); _mm_free(v); _mm_free(out_n);
-    }
+        _mm_free(golden); _mm_free(as); _mm_free(ae);
+        print_row("ReLU", size, scalar_us, lib_us, eigen_us);
+    };
+    bench_relu("784 values", std::integral_constant<size_t,784>{});
+    bench_relu("32 values",  std::integral_constant<size_t,32>{});
 
-    // ---- 2b. 32 → 10  (second layer) ----
-    {
-        constexpr size_t COLS = 32, ROWS = 10;
-        constexpr size_t FLOPS = COLS * ROWS * 2; // 640
-
-        float* W     = alloc_fill(ROWS * COLS, 0.1f);
-        float* v     = alloc_fill(COLS, 0.5f);
-        float* out_n = alloc_fill(ROWS, 0.f);
-
-        Tensor<COLS, ROWS> tW(W);
-        Tensor<COLS>       tv(v);
-
-        double naive_t = bench_us([&]{
-            naive_matvec(W, v, out_n, COLS, ROWS);
-            volatile float s = out_n[0]; (void)s;
-        });
-        double simd_t = bench_us([&]{
-            auto r = mul_b_transposed_scalar(tW, tv);
-            volatile float s = r(0); (void)s;
-        });
-
-        char dims[64]; snprintf(dims, sizeof(dims), "32×10 · v(32)    [%zu FLOPs]", FLOPS);
-        print_row("Dense Forward  (mat-vec)", dims, naive_t, simd_t);
-        _mm_free(W); _mm_free(v); _mm_free(out_n);
-    }
-
-    // ============================================================
-    // Section 3 – Dense Backward  (mul_transposed_scalar = outer product)
-    // Weight gradient accumulation.
-    // ============================================================
-    std::cout << "\n  [Dense Backward — grad ⊗ input → ΔW; includes output alloc]\n\n";
-
-    // ---- 3a. grad(32) ⊗ input(784) → ΔW(32×784) ----
-    {
-        constexpr size_t M = 32, N = 784;
-        constexpr size_t FLOPS = M * N * 2; // 50 176
-
-        float* a     = alloc_fill(M, 0.1f);
-        float* b     = alloc_fill(N, 0.5f);
-        float* out_n = alloc_fill(M * N, 0.f);
-
-        Tensor<M> ta(a);
-        Tensor<N> tb(b);
-
-        double naive_t = bench_us([&]{
-            naive_outer(a, M, b, N, out_n);
-            volatile float s = out_n[0]; (void)s;
-        });
-        double simd_t = bench_us([&]{
-            auto r = mul_transposed_scalar(ta, tb);
-            volatile float s = r(0); (void)s;
-        });
-
-        char dims[64]; snprintf(dims, sizeof(dims), "vec(32) ⊗ vec(784) [%zu FLOPs]", FLOPS);
-        print_row("Dense Backward (outer product)", dims, naive_t, simd_t);
-        _mm_free(a); _mm_free(b); _mm_free(out_n);
-    }
-
-    // ---- 3b. grad(10) ⊗ input(32) → ΔW(10×32) ----
-    {
-        constexpr size_t M = 10, N = 32;
-        constexpr size_t FLOPS = M * N * 2; // 640
-
-        float* a     = alloc_fill(M, 0.1f);
-        float* b     = alloc_fill(N, 0.5f);
-        float* out_n = alloc_fill(M * N, 0.f);
-
-        Tensor<M> ta(a);
-        Tensor<N> tb(b);
-
-        double naive_t = bench_us([&]{
-            naive_outer(a, M, b, N, out_n);
-            volatile float s = out_n[0]; (void)s;
-        });
-        double simd_t = bench_us([&]{
-            auto r = mul_transposed_scalar(ta, tb);
-            volatile float s = r(0); (void)s;
-        });
-
-        char dims[64]; snprintf(dims, sizeof(dims), "vec(10) ⊗ vec(32)  [%zu FLOPs]", FLOPS);
-        print_row("Dense Backward (outer product)", dims, naive_t, simd_t);
-        _mm_free(a); _mm_free(b); _mm_free(out_n);
-    }
-
-    // ============================================================
-    // Section 4 – Activations
-    // ============================================================
-    std::cout << "\n  [Activations — in-place, no allocation]\n\n";
-
-    // ---- 4a. ReLU — 784 values ----
     {
         constexpr size_t N = 784;
-        float* a = alloc_fill(N, 0.5f);
-        Tensor<N> ta(a);
+        float* golden = alloc_normal(N);
+        float* as = alloc(N);
+        float* ae = alloc(N);
+        auto cpy = [&](float* d){ std::memcpy(d, golden, N * sizeof(float)); };
 
-        double naive_t = bench_us([&]{ naive_relu(a, N); });
-        double simd_t  = bench_us([&]{ ta.apply_ReLU(); });
-        print_row("ReLU  (SIMD: _MAX_PS)", "784 values", naive_t, simd_t);
-        _mm_free(a);
+        double scalar_us = bench_us([&]{ cpy(as); },
+            [&]{ naive_sigmoid(as, N); ClobberMemory(); });
+
+        Tensor<N> ta(golden);
+        double lib_us = bench_us([&]{ ta = Tensor<N>(golden); },
+            [&]{ ta.apply_sigmoid(); ClobberMemory(); });
+
+        Eigen::Map<Eigen::Array<float, N, 1>, Eigen::Aligned32> em(ae);
+        double eigen_us = bench_us([&]{ cpy(ae); },
+            [&]{ em = 1.f / (1.f + (-em).exp()); ClobberMemory(); });
+
+        _mm_free(golden); _mm_free(as); _mm_free(ae);
+        print_row("Sigmoid", "784 values", scalar_us, lib_us, eigen_us);
     }
 
-    // ---- 4b. ReLU — 32 values ----
-    {
-        constexpr size_t N = 32;
-        float* a = alloc_fill(N, 0.5f);
-        Tensor<N> ta(a);
-
-        double naive_t = bench_us([&]{ naive_relu(a, N); });
-        double simd_t  = bench_us([&]{ ta.apply_ReLU(); });
-        print_row("ReLU  (SIMD: _MAX_PS)", "32 values", naive_t, simd_t);
-        _mm_free(a);
-    }
-
-    // ---- 4c. Sigmoid — currently scalar in the library ----
-    {
-        constexpr size_t N = 784;
-        float* a = alloc_fill(N, 0.5f);
-        Tensor<N> ta(a);
-
-        double naive_t = bench_us([&]{ naive_sigmoid(a, N); });
-        double simd_t  = bench_us([&]{ ta.apply_sigmoid(); });
-        print_row("Sigmoid  (SIMD: exp_ps + DIV)", "784 values", naive_t, simd_t);
-        _mm_free(a);
-    }
-
-    std::cout << "\n";
+    std::cout << "\n  Note: 'This (AVX2)' uses a fast polynomial exp; Eigen uses an\n"
+                 "  accurate vectorised exp - the Sigmoid row is speed-vs-accuracy.\n\n";
     return 0;
 }
