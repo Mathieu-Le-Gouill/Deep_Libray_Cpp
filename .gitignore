@@ -1,4 +1,9 @@
 /build/
+# Eigen is vendored locally for offline builds but fetched via CMake FetchContent
+# on a fresh checkout - no need to commit ~7 MB of headers.
+/third_party/
+.cache/
+.codegraph/
 CMakeCache.txt
 CMakeFiles/
 Makefile
